@@ -1,0 +1,80 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - develop
+  # タグでは動かないように一時的にコメントアウト
+  #  tags:
+  #    - v*
+  pull_request:
+    branches:
+      - develop
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      id-token: write
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Downcase repository name
+        # GHCR repository name must be lowercase
+        id: downcase
+        run: echo "image_name=ghcr.io/${GITHUB_REPOSITORY,,}-sync" >> "$GITHUB_OUTPUT"
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5.5.1
+        with:
+          images: ${{ steps.downcase.outputs.image_name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
+            type=sha,format=long
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3.2.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.6.1
+        with:
+          driver: docker
+      - name: Login to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6.7.0
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: ${{ steps.downcase.outputs.image_name }}:sha-${{ github.sha }}
+      #      #AWS公式のアクション、AWSへの認証
+      #      #https://github.com/aws-actions/configure-aws-credentials
+      - name: configure AWS credentials
+        if: github.event_name != 'pull_request'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-1
+          role-to-assume: ${{ vars.IAM_ROLE_ARN }}
+      # Step to trigger AWS CodePipeline
+      - name: Run AWS CodeDeploy
+        if: github.event_name != 'pull_request'
+        run: |
+          aws deploy create-deployment \
+            --application-name stbp-dev-codedeploy-app \
+            --deployment-group-name stbp-dev-codedeploy-deployment-group \
+            --revision '{"revisionType": "S3", "s3Location": {"bucket": "stbp-dev-codedeploy", "key": "appspec.yml", "bundleType": "yaml"}}'
