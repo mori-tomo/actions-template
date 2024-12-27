@@ -1,0 +1,111 @@
+name: Plan
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check_diff:
+    uses: ./.github/workflows/_check_diff.yaml
+
+  plan:
+    name: Plan
+    needs: check_diff
+    runs-on: ubuntu-latest
+    if: ${{ needs.check_diff.outputs.diff != '[]' && needs.check_diff.outputs.diff != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJson(needs.check_diff.outputs.diff) }}
+    defaults:
+      run:
+        working-directory: env/${{ matrix.env }}
+    concurrency:
+      group: ${{ matrix.env }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      TF_LOG: ${{ vars.TF_LOG }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3.1.2
+      with:
+        terraform_version: 1.9.5
+    - name: terraform fmt
+      run: terraform fmt
+    - name: Check terraform fmt
+      uses: reviewdog/action-suggester@v1.17.0
+      with:
+        tool_name: terraform fmt
+        fail_on_error: true
+    - name: Check tflint
+      uses: reviewdog/action-tflint@v1.23.2
+      with:
+        tflint_init: true
+        reporter: github-pr-review
+        fail_on_error: false
+    - name: Check trivy
+      uses: reviewdog/action-trivy@v1.11.0
+      with:
+        trivy_command: config
+        trivy_target: .
+        reporter: github-pr-review
+        fail_on_error: false
+    - name: terraform init
+      run: terraform init
+    - name: terraform validate
+      run: terraform validate -no-color
+    - name: Terraform plan
+      id: plan
+      run: |
+        terraform plan -no-color -out=tfplan
+        plan_result=$(terraform show -no-color tfplan)
+        plan_summary=$(echo "$plan_result" | grep -x -E "Plan: .*|No changes. .*")
+        plan_detail=$(echo "$plan_result" | sed 's/::debug::.*//g')
+        echo "PLAN_SUMMARY=${plan_summary}" >> $GITHUB_ENV
+        EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+        {
+          echo "PLAN_DETAIL<<$EOF"
+          echo "${plan_detail::65536}"
+          echo "$EOF"
+        } >> "$GITHUB_ENV"
+    - name: Format plan result
+      id: plan-result
+      uses: actions/github-script@v7.0.1
+      with:
+        result-encoding: string
+        script: |
+          const output = `
+            ### 📖 Plan of \`${{ matrix.env }}\` project
+            ${process.env.PLAN_SUMMARY}
+
+            *Commit: ${context.sha}, RunID: [\`${context.runId}\`](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*
+            <details><summary>Show Details</summary>
+
+            \`\`\`tf\n
+            ${process.env.PLAN_DETAIL}
+            \`\`\`
+
+            </details>
+          `
+          return output
+    - name: Find comment
+      id: fc
+      uses: peter-evans/find-comment@v3.1.0
+      with:
+        issue-number: ${{ github.event.pull_request.number }}
+        comment-author: 'github-actions[bot]'
+        body-includes: 📖 Plan of `${{ matrix.env }}` project
+    - name: Post plan result
+      uses: peter-evans/create-or-update-comment@v4.0.0
+      with:
+        comment-id: ${{ steps.fc.outputs.comment-id }}
+        issue-number: ${{ github.event.pull_request.number }}
+        body: ${{ steps.plan-result.outputs.result }}
+        edit-mode: replace
