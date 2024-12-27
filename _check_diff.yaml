@@ -1,0 +1,41 @@
+name: Check diff
+
+on:
+  workflow_call:
+    outputs:
+      diff:
+        description: 'The env list of the execution target where the difference occurred'
+        value: ${{ jobs.check_diff.outputs.diff }}
+
+jobs:
+  check_diff:
+    name: Check diff
+    runs-on: ubuntu-latest
+    outputs:
+      diff: ${{ steps.check-diff.outputs.diff }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Check diff
+      id: check-diff
+      env:
+        DIFF_PATH: ${{ github.ref == 'refs/heads/main' && 'HEAD~' || 'origin/main' }}
+      run: |
+        diff_files="$(git diff --stat --name-only ${{ env.DIFF_PATH }})"
+        if echo "$diff_files" | grep -q -e 'version.tf' -e '.github/workflows/*'; then
+          diff=$(ls -d env/* \
+            | sed -r 's/env\/([^\/])/\1/' \
+            | jq -R . \
+            | jq -sc)
+        else
+          diff=$(echo "$diff_files" \
+            | grep 'env/' \
+            | sed -r 's/env\/([^\/]+)\/.*/\1/' \
+            | uniq \
+            | jq -R . \
+            | jq -sc)
+        fi
+        echo "diff envs: $diff"
+        echo "diff=${diff}" >> $GITHUB_OUTPUT
