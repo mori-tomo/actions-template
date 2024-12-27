@@ -1,0 +1,87 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: prd
+    permissions:
+      id-token: write
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Downcase repository name
+        # GHCR repository name must be lowercase
+        id: downcase
+        run: echo "image_name=ghcr.io/${GITHUB_REPOSITORY,,}-sync" >> "$GITHUB_OUTPUT"
+
+      #      - name: Scan image with Trivy
+      #        uses: aquasecurity/trivy-action@0.24.0
+      #        with:
+      #          image-ref: ${{ steps.downcase.outputs.image_name }}:sha-${{ github.sha }}
+
+      - name: Increment Push Tag
+        if: github.event_name != 'pull_request'
+        id: increment_version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          current_version=`git ls-remote --tags --sort=v:refname origin 'v*.*.*' | tail -n 1 | head -n 1 | cut -f 2 | cut -d '/' -f 3`
+          IFS='.' read -r -a version_parts <<< $current_version
+          major=${version_parts[0]}
+          minor=${version_parts[1]}
+          patch=${version_parts[2]}
+          new_patch=$((patch + 1))
+          new_version="$major.$minor.$new_patch"
+          echo "TAG_VERSION=$new_version" >> $GITHUB_ENV
+
+          git tag $new_version
+          git push origin $new_version
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5.5.1
+        with:
+          images: ${{ steps.downcase.outputs.image_name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=raw,value= ${{ env.TAG_VERSION }}
+            type=sha
+            type=sha,format=long
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.6.1
+        with:
+          driver: docker
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6.7.0
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
