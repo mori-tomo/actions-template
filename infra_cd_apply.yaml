@@ -1,0 +1,51 @@
+name: Apply
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  check_diff:
+    uses: ./.github/workflows/_check_diff.yaml
+
+  apply:
+    name: Apply
+    needs: check_diff
+    runs-on: ubuntu-latest
+    if: ${{ needs.check_diff.outputs.diff != '[]' && needs.check_diff.outputs.diff != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJson(needs.check_diff.outputs.diff) }}
+    defaults:
+      run:
+        working-directory: env/${{ matrix.env }}
+    environment:
+      name: ${{ matrix.env }}
+    concurrency:
+      group: ${{ matrix.env }}
+    env:
+      IAM_ROLE_ARN: ${{ vars.IAM_ROLE_ARN }}
+      TF_LOG: ${{ vars.TF_LOG }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3.1.2
+      with:
+        terraform_version: 1.9.5
+    - name: Assume Role
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: ap-northeast-1
+        role-to-assume: ${{ env.IAM_ROLE_ARN }}
+    - name: terraform init
+      run: terraform init
+    - name: terraform plan
+      run: terraform plan -no-color -out=tfplan
+    - name: terraform apply
+      run: terraform apply -auto-approve -no-color tfplan
